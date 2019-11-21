@@ -1,176 +1,186 @@
 #include "vex.h"
 
-//Assume a distance from center of 1"
-
 vex::brain Brain;
 vex::controller con;
-
-vex::motor l1(vex::PORT1, vex::gearSetting::ratio18_1, false);
-vex::motor l2(vex::PORT2, vex::gearSetting::ratio18_1, false);
-vex::motor r1(vex::PORT3, vex::gearSetting::ratio18_1, true);
-vex::motor r2(vex::PORT4, vex::gearSetting::ratio18_1, true);
 vex::encoder r(Brain.ThreeWirePort.A);
 vex::encoder l(Brain.ThreeWirePort.C);
-vex::encoder b(Brain.ThreeWirePort.E);
 
-double const sL = 1, sR = 1, sB = 1;
-double lVal, rVal, bVal, lLast, dL, dR, dB;
-double absL, absR;
-double angle, dAngle;
-double dX, dY;
-double x, y;
+vex::motor l1(vex::PORT1, vex::ratio18_1, false);
+vex::motor l2(vex::PORT2, vex::ratio18_1, false);
+vex::motor r1(vex::PORT3, vex::ratio18_1, true);
+vex::motor r2(vex::PORT4, vex::ratio18_1, true);
 
-double distanceToPoint(double targetX, double targetY) {
-  double localX = x, localY = y;
-  return fabs(sqrt((targetX - localX) + (targetY - localY)));
-}
-double angleToPoint(double targetX, double targetY) {
-  double localX = x, localY = y;
-  return atan2((targetX - localX), (targetY - localY));
-}
+double totalX=0, totalY=0;
+double totalTheta=0;
 
-double distanceP(double error, double max) {
-  double kP = 0.5;
-  double speed = error * kP;
-  if(speed > max) speed = max;
-  if(speed < -max) speed = -max;
-  return speed;
-}
-double angleP(double error, double max) {
-  double kP = 0.5;
-  double speed = error * kP;
-  if(speed > max) speed = max;
-  if(speed < -max) speed = -max;
-  return speed;
-}
-void driveControl(double distanceVel, double angleVel) {
-  double leftVel = distanceVel + angleVel;
-  double rightVel = distanceVel - angleVel;
-  l1.spin(vex::directionType::fwd, leftVel, vex::velocityUnits::pct);
-  l2.spin(vex::directionType::fwd, leftVel, vex::velocityUnits::pct);
-  r1.spin(vex::directionType::fwd, rightVel, vex::velocityUnits::pct);
-  r2.spin(vex::directionType::fwd, rightVel, vex::velocityUnits::pct);
-}
-int positionTracker() {
-  while(true) {
-    /*
-    Calculate change in tracking wheel distance
-      change in left distance = (current left - last left) / 360 * (2.75 * pi)
-    */
-    dL = (l.rotation(vex::rotationUnits::deg) - lVal) / 360 * (M_PI * 2.75);
-    dR = (r.rotation(vex::rotationUnits::deg) - rVal) / 360 * (M_PI * 2.75);
-    dB = (b.rotation(vex::rotationUnits::deg) - bVal) / 360 * (M_PI * 2.75);
+int tracker() {
 
-    /*
-    Update total in tracking wheel distance
-      total left distance = total left distance + change in left distance
-    */
-    absL += dL;
-    absR += dR;
+  /*
+  sL/sR: Distance from left/right wheel to tracking center
+  dL/dR: Change left/right wheel distance in inches since last update
+  lastL/lastR: Last updated left/right wheel distance in inches
+  dTheta: Change in robot angle in _____ since last update
+  totalTheta: Absolute robot angle in _____
+  dDist: Change in distance in inches since last update or 'r' in polar coordinates
+  avgTheta: Angle used for polar coordinates
+  totalX/totalY: Absolute rectangular coordinates for robot
+  */
+  double sL = 1, sR = 1; //Temporary
+  double lastL=0, lastR=0;
+  double dL=0, dR=0;
+  double dTheta=0;
+  double dDist=0;
+  double avgTheta=0;
+  double dX=0, dY=0;
+
+  while(1) {
+
+    //Convert encoder ticks since last update into distance in inches
+    dL = (l.rotation(vex::degrees) - lastL) / 360.0 * (M_PI * 2.75);
+    dR = (r.rotation(vex::degrees) - lastR) / 360.0 * (M_PI * 2.75);
+
+    //Set left rotation to last updated ticks
+    lastL = l.rotation(vex::degrees);
+    lastR = r.rotation(vex::degrees);
     
-    /*
-    Calculate change in angle
-      change in angle = absolute angle - last absolute angle
-    */
-    dAngle = (absL - absR) / (sL + sR) - angle;
+    //Calculate change in robot angle since last update
+    dTheta = (lastL - lastR) / (sL + sR) - totalTheta;
 
-    /*
-    Calculate total absolute angle relative to starting position
-      absolute angle = (total left distance - total right distance) / (left distance from center + right distance from center)
-    */
-    angle = (absL - absR) / (sL + sR);
+    totalTheta = (lastL - lastR) / (sL + sR);
 
-    /*
-    Update current trackw wheel rotation
-    */
-    lVal = l.rotation(vex::rotationUnits::deg);
-    rVal = r.rotation(vex::rotationUnits::deg);
-    bVal = b.rotation(vex::rotationUnits::deg);
-
-    /*
-    Calculate change in cartesian position
-      if change in right distance = change in left distance:
-        change in x = absolute x + change in back distance
-        change in y = absolute y + change in right distance
-      else:
-        change in x = chord length of arc around center radius concentric with back tracking wheel circle circle = 2 * (dB / dAngle + back distance from center) * sin(angle / 2)
-        change in y = chord length of arc around center radius concentric with right tracking wheel circle = 2 * (dR / dAngle + back distance from center) * sin(angle / 2)
-    */
-    if(angle == 0) {
-      dX = dB;
-      dY = dR;
-    } 
+    //Calcualte distance robot has traveled (length of arc and 'r' for polar coordinates)
+    if(totalTheta == 0) {
+      dDist = dR;
+    }
     else {
-      dX = 2 * sin(angle / 2) * (dB / dAngle + sB);
-      dY = 2 * sin(angle / 2) * (dR / dAngle + sR);
+      dDist = 2 * sin(dTheta / 2.0) * (dR / dTheta + sR);
     }
 
-    //Update frequency
-    wait(5, vex::timeUnits::msec);
+    //Calculate angle robot for translational shift (theta for polar coordinates)
+    avgTheta = totalTheta + (dTheta / 2.0);
+
+    //Convert from polar coordinates to rectangular coordinates for changes in x and y
+    dX = dDist * cos(avgTheta);
+    dY = dDist * sin(avgTheta);
+
+    //Add change in x and y to absolute rectangular coordinates
+    totalX += dX;
+    totalY += dY;
+
+    vex::wait(5, vex::msec);
   }
   return 1;
 }
 
-void move(double targetX, double targetY, double kTurn) {
-  double settleRadius = 5;
-  while(true) {
-    double angleError = angleToPoint(targetX, targetY);
-    double distanceError = distanceToPoint(targetX, targetY);
-
-    if(fabs(angleError) > 90.0)
-      distanceError = -distanceError;
-    
-    if(fabs(distanceError) < settleRadius)
-      angleError = 0;
-    else if(distanceError < 0)
-      angleError = -angleError;
-    
-    double angleVel = angleP(angleError, 100);
-    double distanceVel = distanceP(distanceError, 100);
-
-    driveControl(distanceVel, angleVel * kTurn);
-
-    vex::wait(5, vex::timeUnits::msec);
-  }
-}
-
-void turn(double degrees, double max, double error) {
-  
-}
-
 int drive() {
-  while(true) {
+  while(1) {
     double leftY = con.Axis3.position();
     double rightY = con.Axis2.position();
 
-    l1.spin(vex::directionType::fwd, leftY, vex::velocityUnits::pct);
-    l2.spin(vex::directionType::fwd, leftY, vex::velocityUnits::pct);
-    r1.spin(vex::directionType::fwd, rightY, vex::velocityUnits::pct);
-    r2.spin(vex::directionType::fwd, rightY, vex::velocityUnits::pct);
+    l1.spin(vex::forward, leftY, vex::pct);
+    l2.spin(vex::forward, leftY, vex::pct);
+    r1.spin(vex::forward, rightY, vex::pct);
+    r2.spin(vex::forward, rightY, vex::pct);
 
-    vex::wait(5, vex::timeUnits::msec);
+    vex::wait(5, vex::msec);
+  }
+  return 1;
+}
+
+//Calculate distance from current point to target point
+double distanceToPoint(double targetX, double targetY) {
+  double x = totalX, y = totalY;
+  return fabs(sqrt((targetX - x) + (targetY - y)));
+}
+
+//Calculate angle from current point to target point
+double angleToPoint(double targetX, double targetY) {
+  double x = totalX, y = totalY;
+  return atan2(targetX - x, targetY - y);
+}
+
+//P-controller (maybe add ID) for distance error
+double getDistVel(double error, double max, double accel) {
+  double kP = 0.5; //Temporary
+  double vel = error * kP;
+  if(vel > max) vel = max;
+  if(vel < -max) vel = -max;
+  return vel;
+}
+
+//P-controller (maybe add ID) for angle error
+double getAngleVel(double error, double max, double accel) {
+  double kP = 0.5; //Temporary
+  double vel = error * kP;
+  if(vel > max) vel = max;
+  if(vel < -max) vel = -max;
+  return vel;
+}
+
+//Use Calculated velocities move chassis
+void moveChassis(double distVel, double angleVel) {
+  double leftVel = distVel + angleVel;
+  double rightVel = distVel - angleVel;
+
+  //I don't understand this part
+  double maxVel = std::max(fabs(leftVel), fabs(rightVel));
+
+  if(maxVel > 100) {
+    leftVel /= maxVel;
+    rightVel /= maxVel;
+  }
+
+  l1.spin(vex::forward, leftVel, vex::pct);
+  l2.spin(vex::forward, leftVel, vex::pct);
+  r1.spin(vex::forward, rightVel, vex::pct);
+  r2.spin(vex::forward, rightVel, vex::pct);
+}
+
+//Move from currnet point to target point
+int move(double targetX, double targetY, double kDist, double kAngle) {
+
+  double angleError=0, distError=0;
+  double settleRadius=5;
+
+  while(1) {
+    
+    //Get distance and angle error
+    distError = distanceToPoint(targetX, targetY);
+    angleError = angleToPoint(targetX, targetY);
+
+    //If the angle is behind the robot, add 90 degrees to drive backwards
+    if(fabs(angleError) > 90.0)
+      distError = -distError;
+
+    //I don't understand this part
+    if(distError < settleRadius)
+      angleError = 0;
+    else
+      angleError += 90.0;
+
+    //Calculate distance and angle velocities
+    double angleVel = getAngleVel(angleError, 100, 0);
+    double distVel = getDistVel(distError, 100, 0);
+
+    //Scale and move motors with given velocities
+    moveChassis(distVel * kDist, angleVel * kAngle);
   }
 }
 
-void initScreen() {
-  Brain.Screen.clearScreen();
-  Brain.Screen.setOrigin(0, 0);
-  Brain.Screen.setCursor(0, 0);
-}
-
 int display() {
-  while(true) {
-    printf();
-    vex::wait(5, vex::timeUnits::msec);
+  Brain.Screen.clearScreen();
+  while(1) {
+    
+    Brain.Screen.printAt(0, 0, "%*s: %f", 10, "X", totalX);
+    Brain.Screen.printAt(0, 1, "%*s: %f", 10, "Y", totalY);
+    Brain.Screen.printAt(0, 2, "%*s: %f", 10, "Angle", totalTheta);
+
+    vex::wait(5, vex::msec);
   }
 }
 
 int main() {
-  initScreen();
-  vex::task positionTrackerTask(positionTracker);
-  vex::task driveTask(drive);
-
-
+  vex::task trackerTask(tracker);
 
   while(true) {vex::wait(5, vex::msec);}
 }
